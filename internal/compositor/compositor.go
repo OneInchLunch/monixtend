@@ -62,11 +62,17 @@ func (m Monitor) LogicalHeight() int {
 type Compositor interface {
 	// Name identifies the compositor backend, e.g. "hyprland".
 	Name() string
+	// SupportsVirtualOutputs reports whether CreateOutput/RemoveOutput can be
+	// used. The generic wlroots backend only manages existing heads.
+	SupportsVirtualOutputs() bool
 	// Monitors returns the currently configured outputs.
 	Monitors(ctx context.Context) ([]Monitor, error)
-	// CreateOutput creates a virtual (headless) output named name. When spec
+	// CreateOutput creates a virtual (headless) output, preferring name, and
+	// returns the name it was actually created under. Some compositors assign
+	// their own name (Sway's virtual outputs are always HEADLESS-n), so callers
+	// must use the returned name for subsequent capture and removal. When spec
 	// carries a size the output is configured immediately afterwards.
-	CreateOutput(ctx context.Context, name string, spec OutputSpec) error
+	CreateOutput(ctx context.Context, name string, spec OutputSpec) (string, error)
 	// SetGeometry reconfigures an existing output.
 	SetGeometry(ctx context.Context, name string, spec OutputSpec) error
 	// RemoveOutput destroys a virtual output.

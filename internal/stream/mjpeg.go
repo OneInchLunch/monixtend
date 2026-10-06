@@ -3,9 +3,11 @@
 package stream
 
 import (
+	"bufio"
 	"bytes"
 	"image"
 	"image/jpeg"
+	"io"
 
 	"github.com/lunch/monixtend/internal/capture"
 )
@@ -14,7 +16,6 @@ import (
 // calls and is not safe for concurrent use.
 type MJPEG struct {
 	quality int
-	buf     bytes.Buffer
 	img     *image.YCbCr
 	cbAcc   []int32
 	crAcc   []int32
@@ -42,20 +43,28 @@ func (e *MJPEG) SetQuality(q int) {
 // Quality returns the current encoder quality.
 func (e *MJPEG) Quality() int { return e.quality }
 
-// Encode converts a frame to JPEG. The returned slice is owned by the caller.
-func (e *MJPEG) Encode(f *capture.Frame) ([]byte, error) {
+// EncodeInto writes the JPEG for f to w. When w is buffered (implements
+// Flush() error, such as *bufio.Writer) image/jpeg writes into it directly and
+// no scratch buffer is allocated; otherwise image/jpeg allocates one.
+func (e *MJPEG) EncodeInto(f *capture.Frame, w io.Writer) error {
 	if e.img == nil || e.img.Rect.Dx() != f.Width || e.img.Rect.Dy() != f.Height {
 		e.img = image.NewYCbCr(image.Rect(0, 0, f.Width, f.Height), image.YCbCrSubsampleRatio420)
 		e.cbAcc = make([]int32, (f.Width+1)/2*((f.Height+1)/2))
 		e.crAcc = make([]int32, len(e.cbAcc))
 	}
 	bgraToYCbCr(f, e.img, e.cbAcc, e.crAcc)
-	e.buf.Reset()
-	if err := jpeg.Encode(&e.buf, e.img, &jpeg.Options{Quality: e.quality}); err != nil {
+	return jpeg.Encode(w, e.img, &jpeg.Options{Quality: e.quality})
+}
+
+// Encode converts a frame to JPEG. The returned slice is owned by the caller.
+func (e *MJPEG) Encode(f *capture.Frame) ([]byte, error) {
+	var buf bytes.Buffer
+	bw := bufio.NewWriter(&buf)
+	if err := e.EncodeInto(f, bw); err != nil {
 		return nil, err
 	}
-	out := make([]byte, e.buf.Len())
-	copy(out, e.buf.Bytes())
+	out := make([]byte, buf.Len())
+	copy(out, buf.Bytes())
 	return out, nil
 }
 

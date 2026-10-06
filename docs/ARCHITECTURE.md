@@ -10,7 +10,8 @@ environments can be added without touching the streaming or web stack.
 cmd/monixtend          CLI: run, detect, output …, capture
 internal/
   config/              flags and runtime configuration
-  compositor/          Compositor interface + Hyprland IPC (pure Go)
+  compositor/          Compositor interface + Hyprland/Sway IPC + generic wlroots
+    wlrogm/            self-contained zwlr_output_management_unstable_v1 client
   capture/             Source interface + wlr-screencopy capture (pure Go)
     screencopy/        hand-generated wlr-screencopy protocol bindings
   input/               Injector interface + browser→evdev keycode map
@@ -24,21 +25,26 @@ internal/
 
 ## Interfaces
 
-Every environment-specific concern is behind one of four interfaces. The
-`wayland`/wlroots implementation is the current backend; X11 and others plug
-in behind the same shapes.
+Every environment-specific concern is behind one of four interfaces. Three
+compositor backends exist: Hyprland and Sway over their native IPC (both can
+create virtual outputs), and a generic `wlr` backend over
+`zwlr_output_management_unstable_v1` that enumerates and reconfigures heads but
+cannot create them. See `docs/BACKLOG.md` for the rest.
 
 ```go
 // internal/compositor
 type Compositor interface {
     Name() string
+    SupportsVirtualOutputs() bool
     Monitors(ctx) ([]Monitor, error)
-    CreateOutput(ctx, name, OutputSpec) error
+    CreateOutput(ctx, name, OutputSpec) (string, error) // returns the actual name
     SetGeometry(ctx, name, OutputSpec) error
     RemoveOutput(ctx, name) error
 }
 // hyprland.go: request socket at
 // $XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock
+// sway.go: i3-ipc protocol on $SWAYSOCK (create_output / output ... unplug)
+// wlr.go: generic wlroots via wlrogm (enumeration + geometry only)
 
 // internal/capture
 type Source interface {
@@ -106,9 +112,11 @@ secure context and has WebCodecs; the server selects H.264 when configured
 ## Session lifecycle
 
 1. `handleWS` validates the token, reads `hello`, clamps the size.
-2. `newSession`: computes layout bounds, places a `monixtend-<id>` headless
-   output right of the rightmost monitor, opens the capture source, and (when
-   permitted) creates the uinput devices sized to the layout.
+2. `newSession`: computes layout bounds, asks the compositor to place a
+   `monixtend-<id>` headless output right of the rightmost monitor (Sway
+   assigns its own `HEADLESS-n` name, so the backend's returned name is used),
+   opens the capture source, and (when permitted) creates the uinput devices
+   sized to the layout.
 3. `stream`: a ticker-triggered loop captures a frame, encodes it, and pushes
    it to a per-client queue that drops stale frames under backpressure and
    adapts MJPEG quality. A reader goroutine detects disconnect and cancels the
@@ -135,6 +143,8 @@ extend its own desktop onto this host's monitor:
 - Before launch it asks the compositor (Hyprland) to borderless-fullscreen the
   receiver window on the chosen output via a dynamic window rule
   (`compositor.KioskManager`); on exit it reloads the config to drop the rule.
+  Kiosk pinning is Hyprland-only; on Sway the receiver opens as a normal
+  window.
 - Because the window appears before any remote client connects, the rule is
   applied ahead of the process start (static fullscreen props only take effect
   at window map time).
@@ -158,3 +168,11 @@ The `internal/capture/screencopy` bindings were hand-written from
 because the upstream module in use encodes `wl_registry.bind` interface names
 with the padded length, which compositors reject; `bindGlobal` in
 `internal/capture/wayland.go` reimplements the request correctly.
+
+`internal/compositor/wlrogm` is a second hand-written client, for
+`zwlr_output_management_unstable_v1`. The `go-wayland` client cannot dispatch
+events for objects the server creates via `new_id` (this protocol creates heads
+and modes that way), so `wlrogm` keeps its own object table and read loop,
+reusing the `client` package only for socket I/O and wire helpers. It binds the
+manager directly because the library's `Registry.Bind` has the padded-name bug
+above.

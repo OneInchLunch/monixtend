@@ -347,10 +347,11 @@ func cmdOutput(ctx context.Context, logger *slog.Logger, args []string) error {
 				return err
 			}
 		}
-		if err := comp.CreateOutput(ctx, name, spec); err != nil {
+		actual, err := comp.CreateOutput(ctx, name, spec)
+		if err != nil {
 			return err
 		}
-		fmt.Printf("created %s\n", name)
+		fmt.Printf("created %s\n", actual)
 		return nil
 	case "remove":
 		if len(args) < 2 {

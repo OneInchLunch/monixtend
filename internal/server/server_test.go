@@ -27,3 +27,27 @@ func TestClampSize(t *testing.T) {
 		}
 	}
 }
+
+func TestSubscriberDropsOldestAndRecycles(t *testing.T) {
+	sub := newSubscriber(nil)
+	for _, s := range []string{"one", "two", "three"} {
+		b := sub.getBuf()
+		b.bb.WriteString(s)
+		sub.sendFrame(b)
+	}
+	if sub.drops != 2 {
+		t.Fatalf("drops = %d, want 2", sub.drops)
+	}
+	msg := <-sub.frames
+	if got := string(msg.data); got != "three" {
+		t.Errorf("queued frame = %q, want %q", got, "three")
+	}
+	sub.putBuf(msg.buf)
+	b := sub.getBuf()
+	if b.bb.Len() != 0 {
+		t.Errorf("recycled buffer len = %d, want 0", b.bb.Len())
+	}
+	if b.bb.Cap() == 0 {
+		t.Error("recycled buffer lost its capacity")
+	}
+}

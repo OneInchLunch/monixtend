@@ -40,6 +40,9 @@ func New(cfg config.Config, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !comp.SupportsVirtualOutputs() {
+		return nil, fmt.Errorf("compositor %q can only manage existing outputs; use Hyprland or Sway for the server (see docs/BACKLOG.md)", comp.Name())
+	}
 	token := cfg.Token
 	if token == "" {
 		var b [16]byte

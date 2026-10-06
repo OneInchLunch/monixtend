@@ -44,6 +44,9 @@ func NewHyprlandFromEnv() (*Hyprland, error) {
 // Name implements Compositor.
 func (h *Hyprland) Name() string { return "hyprland" }
 
+// SupportsVirtualOutputs implements Compositor.
+func (h *Hyprland) SupportsVirtualOutputs() bool { return true }
+
 // request performs a single synchronous round trip with the Hyprland IPC
 // socket. The socket is synchronous and single shot, so the write side is
 // always closed before reading the reply.
@@ -89,24 +92,24 @@ func (h *Hyprland) Monitors(ctx context.Context) ([]Monitor, error) {
 }
 
 // CreateOutput implements Compositor.
-func (h *Hyprland) CreateOutput(ctx context.Context, name string, spec OutputSpec) error {
+func (h *Hyprland) CreateOutput(ctx context.Context, name string, spec OutputSpec) (string, error) {
 	if name == "" {
-		return errors.New("output name must not be empty")
+		return "", errors.New("output name must not be empty")
 	}
 	if err := h.ok(ctx, "output create headless "+name); err != nil {
-		return fmt.Errorf("create output %q: %w", name, err)
+		return "", fmt.Errorf("create output %q: %w", name, err)
 	}
 	// The output is registered synchronously, but wait until it is visible so
 	// a following geometry call cannot race the monitor appearing.
 	if err := h.waitForMonitor(ctx, name, 2*time.Second); err != nil {
-		return err
+		return "", err
 	}
 	if spec.Width > 0 && spec.Height > 0 {
 		if err := h.SetGeometry(ctx, name, spec); err != nil {
-			return err
+			return name, err
 		}
 	}
-	return nil
+	return name, nil
 }
 
 // SetGeometry implements Compositor.

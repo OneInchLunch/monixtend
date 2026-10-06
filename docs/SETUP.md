@@ -13,7 +13,12 @@ needed.
 - **Hyprland**: detected via `HYPRLAND_INSTANCE_SIGNATURE`. Creates outputs
   with `output create headless` and configures them with `hl.monitor(...)`.
 - **Sway**: detected via `SWAYSOCK` (i3-compatible IPC; `create_output`) —
-  implemented but not yet enabled.
+  creates a `HEADLESS-n` output, configures it with a custom mode, and removes
+  it with `output <name> unplug`.
+- **Other wlroots compositors** (River, niri, labwc, …): detected when they
+  advertise `zwlr_output_management_unstable_v1`. Enumeration and
+  `output geometry` work; the protocol cannot create virtual outputs, so use
+  Hyprland or Sway for `run`.
 
 ### /dev/uinput
 
@@ -123,7 +128,10 @@ receives; nothing is installed on the Mac.
 - GStreamer with the H.264 decoders and a video sink:
   `gstreamer*` base/good/bad, `gst-plugins` with `openh264dec` and
   `waylandsink` (or `ximagesink` as a fallback).
-- `avahi-daemon` running (Bonjour advertising).
+- `avahi-daemon` (Bonjour advertising). Optional with UxPlay ≥ 1.74, which can
+  use its built-in mDNS instead.
+- Optional hardware decode drivers: VA-API (Intel/AMD), the NVIDIA CUDA driver,
+  or the Raspberry Pi `bcm2835-codec` module.
 
 On Arch:
 
@@ -131,11 +139,38 @@ On Arch:
 # install a uxplay package from AUR if available, e.g.:
 #   paru -S uxplay  (or uxplay-git)
 sudo pacman -S --needed gstreamer gst-plugins-base gst-plugins-good \
-  gst-plugins-bad gst-libav avahi openh264
-systemctl --user start avahi-daemon
+  gst-plugins-bad gst-plugins-ugly gst-libav avahi openh264
+sudo systemctl enable --now avahi-daemon
 ```
 
-If your distro does not ship UxPlay, build it from source (no root needed):
+On Debian/Ubuntu:
+
+```sh
+sudo apt install -y \
+  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav \
+  avahi-daemon
+sudo apt install -y uxplay || echo "not packaged here — build from source below"
+sudo systemctl enable --now avahi-daemon
+```
+
+On Fedora:
+
+```sh
+sudo dnf install -y \
+  gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good \
+  gstreamer1-plugins-bad-free gstreamer1-plugins-ugly-free gstreamer1-libav \
+  avahi
+sudo systemctl enable --now avahi-daemon
+```
+
+If your distro does not ship UxPlay, build it from source (no root needed).
+This needs `cmake`, a C++ compiler, OpenSSL and libplist development headers,
+and the GStreamer development packages (`libgstreamer1.0-dev
+libgstreamer-plugins-base1.0-dev` on Debian/Ubuntu, `gstreamer1-devel
+gstreamer1-plugins-base-devel` on Fedora). Add `libavahi-compat-libdnssd-dev`
+(and `cmake -DUSE_DNS_SD=1`) only if you want external Avahi instead of
+UxPlay's built-in mDNS.
 
 ```sh
 git clone https://github.com/FDH2/UxPlay.git && cd UxPlay

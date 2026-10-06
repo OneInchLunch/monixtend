@@ -30,9 +30,65 @@ type Wayland struct {
 	height int
 
 	buffers []*waylandBuffer
-	scratch []byte
 	closed  bool
+
+	run captureRun
+	// Handler values are bound once and reused across captures so that the
+	// hot path does not allocate closures per frame.
+	hBuffer screencopy.FrameBufferHandlerFunc
+	hDamage screencopy.FrameDamageHandlerFunc
+	hReady  screencopy.FrameReadyHandlerFunc
+	hFailed screencopy.FrameFailedHandlerFunc
 }
+
+// captureRun holds the mutable state of one Capture call. Screencopy frame
+// proxies cannot be reused (each request consumes a fresh Wayland object ID),
+// but the handlers can, so they read/write this shared state instead of
+// capturing locals.
+type captureRun struct {
+	w         *Wayland
+	frame     *screencopy.Frame
+	ready     bool
+	failed    bool
+	hasDamage bool
+	capErr    error
+	buf       *waylandBuffer
+}
+
+func (c *captureRun) reset(frame *screencopy.Frame) {
+	c.frame = frame
+	c.ready = false
+	c.failed = false
+	c.hasDamage = false
+	c.capErr = nil
+	c.buf = nil
+}
+
+func (c *captureRun) onBuffer(e screencopy.FrameBufferEvent) {
+	b, err := c.w.acquireBuffer(e)
+	if err != nil {
+		c.capErr = err
+		c.failed = true
+		return
+	}
+	c.buf = b
+	c.w.width = int(e.Width)
+	c.w.height = int(e.Height)
+	if err := c.frame.CopyWithDamage(b.buf); err != nil {
+		c.capErr = err
+		c.failed = true
+	}
+}
+
+func (c *captureRun) onDamage(e screencopy.FrameDamageEvent) {
+	if e.Width > 0 && e.Height > 0 {
+		c.hasDamage = true
+	}
+}
+
+func (c *captureRun) onReady(screencopy.FrameReadyEvent) { c.ready = true }
+
+func (c *captureRun) onFailed(screencopy.FrameFailedEvent) { c.failed = true }
 
 // NewWayland connects to the ambient Wayland session and prepares to capture
 // outputName. The wlr-screencopy manager must be advertised by the compositor.
@@ -42,6 +98,11 @@ func NewWayland(outputName string, overlayCursor bool) (*Wayland, error) {
 		return nil, fmt.Errorf("capture: connect wayland: %w", err)
 	}
 	w := &Wayland{display: display, overlayCursor: overlayCursor, firstFrame: true}
+	w.run.w = w
+	w.hBuffer = w.run.onBuffer
+	w.hDamage = w.run.onDamage
+	w.hReady = w.run.onReady
+	w.hFailed = w.run.onFailed
 	if err := w.setup(outputName); err != nil {
 		_ = display.Context().Close()
 		return nil, err
@@ -178,38 +239,13 @@ func (w *Wayland) Capture(ctx context.Context) (*Frame, error) {
 		return nil, fmt.Errorf("capture: request frame: %w", err)
 	}
 
-	var (
-		ready     bool
-		failed    bool
-		capErr    error
-		hasDamage bool
-		bufRef    *waylandBuffer
-	)
+	w.run.reset(frame)
+	frame.SetBufferHandler(w.hBuffer)
+	frame.SetDamageHandler(w.hDamage)
+	frame.SetReadyHandler(w.hReady)
+	frame.SetFailedHandler(w.hFailed)
 
-	frame.SetBufferHandler(func(e screencopy.FrameBufferEvent) {
-		b, err := w.acquireBuffer(e)
-		if err != nil {
-			capErr = err
-			failed = true
-			return
-		}
-		bufRef = b
-		w.width = int(e.Width)
-		w.height = int(e.Height)
-		if err := frame.CopyWithDamage(b.buf); err != nil {
-			capErr = err
-			failed = true
-		}
-	})
-	frame.SetDamageHandler(func(e screencopy.FrameDamageEvent) {
-		if e.Width > 0 && e.Height > 0 {
-			hasDamage = true
-		}
-	})
-	frame.SetReadyHandler(func(screencopy.FrameReadyEvent) { ready = true })
-	frame.SetFailedHandler(func(screencopy.FrameFailedEvent) { failed = true })
-
-	for !ready && !failed && capErr == nil {
+	for !w.run.ready && !w.run.failed && w.run.capErr == nil {
 		if err := ctx.Err(); err != nil {
 			_ = frame.Destroy()
 			return nil, err
@@ -221,36 +257,34 @@ func (w *Wayland) Capture(ctx context.Context) (*Frame, error) {
 	}
 	_ = frame.Destroy()
 
-	if capErr != nil {
-		return nil, capErr
+	if w.run.capErr != nil {
+		return nil, w.run.capErr
 	}
-	if failed {
+	if w.run.failed {
 		return nil, errors.New("capture: compositor reported frame failure")
 	}
-	if !hasDamage && !w.firstFrame {
+	if !w.run.hasDamage && !w.firstFrame {
 		return nil, ErrNoChange
 	}
 	w.firstFrame = false
-
-	// Copy the compositor-owned shm buffer into a reused scratch buffer. The
-	// buffer may be resubmitted on the next Capture, so a copy keeps the frame
-	// valid for the caller; reusing the allocation avoids ~one frame's worth
-	// of garbage per tick.
-	if cap(w.scratch) < len(bufRef.data) {
-		w.scratch = make([]byte, len(bufRef.data))
+	if w.run.buf == nil {
+		return nil, errors.New("capture: compositor sent no buffer")
 	}
-	pix := w.scratch[:len(bufRef.data)]
-	copy(pix, bufRef.data)
+	bufRef := w.run.buf
+	w.run.buf = nil
 
-	f := &Frame{
-		Pix:    pix,
+	// Zero-copy: the shm mapping is valid from `ready` until the buffer is
+	// resubmitted on the next Capture. Capture is synchronous and single
+	// threaded, and callers encode the frame before the next call, so
+	// referencing it directly is safe and avoids a full-frame copy per tick.
+	return &Frame{
+		Pix:    bufRef.data,
 		Stride: bufRef.stride,
 		Width:  bufRef.width,
 		Height: bufRef.height,
 		Format: PixelFormat(bufRef.format),
 		PTS:    time.Now(),
-	}
-	return f, nil
+	}, nil
 }
 
 // Close implements Source.

@@ -23,7 +23,10 @@ const (
 	FormatARGB8888 PixelFormat = 0x00
 )
 
-// Frame is a single captured image.
+// Frame is a single captured image. Pix may alias memory owned by the source
+// (for the Wayland source, the compositor's shm mapping) and is only valid
+// until the next Capture call; callers must finish reading or copy it before
+// capturing again.
 type Frame struct {
 	Pix    []byte
 	Stride int
@@ -38,6 +41,7 @@ type Source interface {
 	// Size returns the output dimensions in pixels.
 	Size() (width, height int)
 	// Capture blocks until a frame is available. It may return ErrNoChange.
+	// The returned Frame is only valid until the next Capture call.
 	Capture(ctx context.Context) (*Frame, error)
 	// Close releases the underlying connection and resources.
 	Close() error
